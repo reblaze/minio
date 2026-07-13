@@ -698,6 +698,10 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		} else {
 			globalBrowserConfig.Update(browserCfg)
 		}
+	case config.NotifyNATSSubSys:
+		if err := reloadDynamicNotifyTargets(ctx, s); err != nil {
+			errs = append(errs, err)
+		}
 	case config.ILMSubSys:
 		ilmCfg, err := ilm.LookupConfig(s[config.ILMSubSys][config.Default])
 		if err != nil {
@@ -720,6 +724,25 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	return nil
+}
+
+func reloadDynamicNotifyTargets(ctx context.Context, s config.Config) error {
+	transport := NewHTTPTransport()
+	newNotifyTargetList, err := notify.FetchEnabledTargets(ctx, s, transport)
+	if err != nil {
+		return fmt.Errorf("unable to initialize notification target(s): %w", err)
+	}
+
+	oldNotifyTargetList := globalNotifyTargetList
+	globalNotifyTargetList = newNotifyTargetList
+
+	if globalEventNotifier != nil {
+		if err := globalEventNotifier.ReloadNotifyTargets(oldNotifyTargetList, newNotifyTargetList); err != nil {
+			return fmt.Errorf("unable to reload notification target(s): %w", err)
+		}
+	}
+
 	return nil
 }
 

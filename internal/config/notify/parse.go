@@ -837,6 +837,10 @@ var (
 			Value: "",
 		},
 		config.KV{
+			Key:   target.NATSUserCredentials,
+			Value: "",
+		},
+		config.KV{
 			Key:   target.NATSPassword,
 			Value: "",
 		},
@@ -845,11 +849,19 @@ var (
 			Value: "",
 		},
 		config.KV{
+			Key:   target.NATSNKeySeed,
+			Value: "",
+		},
+		config.KV{
 			Key:   target.NATSTLS,
 			Value: config.EnableOff,
 		},
 		config.KV{
 			Key:   target.NATSTLSSkipVerify,
+			Value: config.EnableOff,
+		},
+		config.KV{
+			Key:   target.NATSTLSHandshakeFirst,
 			Value: config.EnableOff,
 		},
 		config.KV{

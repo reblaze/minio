@@ -181,6 +181,7 @@ var SubSystems = madmin.SubSystems
 var SubSystemsDynamic = set.CreateStringSet(
 	APISubSys,
 	CompressionSubSys,
+	NotifyNATSSubSys,
 	ScannerSubSys,
 	HealSubSys,
 	SubnetSubSys,
