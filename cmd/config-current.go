@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"strings"
 	"sync"
 
@@ -50,9 +51,15 @@ import (
 	"github.com/minio/minio/internal/config/storageclass"
 	"github.com/minio/minio/internal/config/subnet"
 	"github.com/minio/minio/internal/crypto"
+	"github.com/minio/minio/internal/event/target"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/pkg/v3/env"
+)
+
+var (
+	notifyNATSReloadMu sync.Mutex
+	lastNotifyNATSArgs map[string]target.NATSArgs
 )
 
 func initHelp() {
@@ -698,6 +705,10 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		} else {
 			globalBrowserConfig.Update(browserCfg)
 		}
+	case config.NotifyNATSSubSys:
+		if err := reloadDynamicNotifyTargets(ctx, s); err != nil {
+			errs = append(errs, err)
+		}
 	case config.ILMSubSys:
 		ilmCfg, err := ilm.LookupConfig(s[config.ILMSubSys][config.Default])
 		if err != nil {
@@ -721,6 +732,49 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+func reloadDynamicNotifyTargets(ctx context.Context, s config.Config) error {
+	changed, err := notifyNATSConfigChanged(s)
+	if err != nil {
+		return fmt.Errorf("unable to parse notify_nats configuration: %w", err)
+	}
+	if !changed {
+		return nil
+	}
+
+	transport := NewHTTPTransport()
+	newNotifyTargetList, err := notify.FetchEnabledTargets(ctx, s, transport)
+	if err != nil {
+		return fmt.Errorf("unable to initialize notification target(s): %w", err)
+	}
+
+	oldNotifyTargetList := globalNotifyTargetList
+	globalNotifyTargetList = newNotifyTargetList
+
+	if globalEventNotifier != nil {
+		if err := globalEventNotifier.ReloadNotifyTargets(oldNotifyTargetList, newNotifyTargetList); err != nil {
+			return fmt.Errorf("unable to reload notification target(s): %w", err)
+		}
+	}
+
+	return nil
+}
+
+func notifyNATSConfigChanged(s config.Config) (bool, error) {
+	nextArgs, err := notify.GetNotifyNATS(s[config.NotifyNATSSubSys], nil)
+	if err != nil {
+		return false, err
+	}
+
+	notifyNATSReloadMu.Lock()
+	defer notifyNATSReloadMu.Unlock()
+
+	if reflect.DeepEqual(lastNotifyNATSArgs, nextArgs) {
+		return false, nil
+	}
+	lastNotifyNATSArgs = maps.Clone(nextArgs)
+	return true, nil
 }
 
 // applyDynamicConfig will apply dynamic config values.

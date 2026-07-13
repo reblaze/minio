@@ -460,6 +460,13 @@ var (
 			Sensitive:   true,
 		},
 		config.HelpKV{
+			Key:         target.NATSUserCredentials,
+			Description: "NATS user credentials file path",
+			Optional:    true,
+			Type:        "string",
+			Sensitive:   true,
+		},
+		config.HelpKV{
 			Key:         target.NATSPassword,
 			Description: "NATS password",
 			Optional:    true,
@@ -476,6 +483,14 @@ var (
 			Secret:      true,
 		},
 		config.HelpKV{
+			Key:         target.NATSNKeySeed,
+			Description: "NATS nkey seed",
+			Optional:    true,
+			Type:        "string",
+			Sensitive:   true,
+			Secret:      true,
+		},
+		config.HelpKV{
 			Key:         target.NATSTLS,
 			Description: "set to 'on' to enable TLS",
 			Optional:    true,
@@ -484,6 +499,12 @@ var (
 		config.HelpKV{
 			Key:         target.NATSTLSSkipVerify,
 			Description: `trust server TLS without verification, defaults to "on" (verify)`,
+			Optional:    true,
+			Type:        "on|off",
+		},
+		config.HelpKV{
+			Key:         target.NATSTLSHandshakeFirst,
+			Description: "set to 'on' to perform TLS handshake before expecting the INFO message",
 			Optional:    true,
 			Type:        "on|off",
 		},

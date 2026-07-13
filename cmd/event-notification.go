@@ -102,6 +102,23 @@ func (evnot *EventNotifier) InitBucketTargets(ctx context.Context, objAPI Object
 	return nil
 }
 
+// ReloadNotifyTargets replaces configured notification targets at runtime.
+func (evnot *EventNotifier) ReloadNotifyTargets(oldTargets, newTargets *event.TargetList) error {
+	if evnot == nil || newTargets == nil {
+		return nil
+	}
+
+	oldTargetIDSet := event.NewTargetIDSet()
+	if oldTargets != nil {
+		for targetID := range oldTargets.TargetMap() {
+			oldTargetIDSet[targetID] = struct{}{}
+		}
+	}
+
+	evnot.targetList.Remove(oldTargetIDSet)
+	return evnot.targetList.Add(newTargets.Targets()...)
+}
+
 // AddRulesMap - adds rules map for bucket name.
 func (evnot *EventNotifier) AddRulesMap(bucketName string, rulesMap event.RulesMap) {
 	evnot.Lock()
