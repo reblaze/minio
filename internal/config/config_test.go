@@ -18,6 +18,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -127,4 +128,57 @@ func TestValidRegion(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The invalid-keys error is logged by the server and printed by `mc`. A
+// rejected key may carry a credential, so only key names may appear in it.
+func TestCheckValidKeysDoesNotLeakValues(t *testing.T) {
+	const (
+		badKey    = "unknown_key"
+		badSecret = "s3cr3t-must-not-appear"
+	)
+
+	assertRedacted := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error for an unregistered key")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, badSecret) {
+			t.Errorf("error leaks the rejected value: %s", msg)
+		}
+		if !strings.Contains(msg, badKey) {
+			t.Errorf("error does not name the rejected key: %s", msg)
+		}
+		if !strings.Contains(msg, "mc admin config reset") {
+			t.Errorf("error lost the remediation hint: %s", msg)
+		}
+	}
+
+	t.Run("func", func(t *testing.T) {
+		kv := KVS{
+			KV{Key: Enable, Value: EnableOn},
+			KV{Key: badKey, Value: badSecret},
+		}
+		validKVS := KVS{KV{Key: Enable, Value: EnableOff}}
+		assertRedacted(t, CheckValidKeys("test_subsys", kv, validKVS))
+	})
+
+	t.Run("method", func(t *testing.T) {
+		const subSys = "test_subsys_method"
+		RegisterDefaultKVS(map[string]KVS{
+			subSys: {KV{Key: Enable, Value: EnableOff}},
+		})
+		t.Cleanup(func() { delete(DefaultKVS, subSys) })
+
+		c := Config{
+			subSys: map[string]KVS{
+				Default: {
+					KV{Key: Enable, Value: EnableOn},
+					KV{Key: badKey, Value: badSecret},
+				},
+			},
+		}
+		assertRedacted(t, c.CheckValidKeys(subSys, nil))
+	})
 }

@@ -112,6 +112,12 @@ var (
 			Type:        "on|off",
 		},
 		config.HelpKV{
+			Key:         target.AmqpImmediate,
+			Description: "return messages that cannot be delivered to a consumer straight away when set to 'on', default is 'off'",
+			Optional:    true,
+			Type:        "on|off",
+		},
+		config.HelpKV{
 			Key:         target.AmqpDurable,
 			Description: "persist queue across broker restarts when set to 'on', default is 'off'",
 			Optional:    true,
@@ -461,7 +467,7 @@ var (
 		},
 		config.HelpKV{
 			Key:         target.NATSUserCredentials,
-			Description: "NATS user credentials file path",
+			Description: "path to NATS user credentials (.creds) file for JWT auth",
 			Optional:    true,
 			Type:        "string",
 			Sensitive:   true,
@@ -484,11 +490,10 @@ var (
 		},
 		config.HelpKV{
 			Key:         target.NATSNKeySeed,
-			Description: "NATS nkey seed",
+			Description: "path to NATS NKey seed file",
 			Optional:    true,
 			Type:        "string",
 			Sensitive:   true,
-			Secret:      true,
 		},
 		config.HelpKV{
 			Key:         target.NATSTLS,
@@ -504,7 +509,7 @@ var (
 		},
 		config.HelpKV{
 			Key:         target.NATSTLSHandshakeFirst,
-			Description: "set to 'on' to perform TLS handshake before expecting the INFO message",
+			Description: "set to 'on' to perform TLS handshake before waiting for server INFO",
 			Optional:    true,
 			Type:        "on|off",
 		},
