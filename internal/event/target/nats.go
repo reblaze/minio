@@ -170,6 +170,17 @@ func (n NATSArgs) Validate() error {
 	return nil
 }
 
+// userCredentials returns the JWT authentication option. The user JWT is read
+// from the credentials file. When an nkey seed file is configured as well, it
+// signs the server nonce, otherwise the seed is read from the credentials file
+// too. The NATS client rejects a JWT combined with a separate nkey option.
+func (n NATSArgs) userCredentials() nats.Option {
+	if n.NKeySeed != "" {
+		return nats.UserCredentials(n.UserCredentials, n.NKeySeed)
+	}
+	return nats.UserCredentials(n.UserCredentials)
+}
+
 // To obtain a nats connection from args.
 func (n NATSArgs) connectNats() (*nats.Conn, error) {
 	connOpts := []nats.Option{nats.Name("Minio Notification"), nats.MaxReconnects(-1)}
@@ -177,12 +188,12 @@ func (n NATSArgs) connectNats() (*nats.Conn, error) {
 		connOpts = append(connOpts, nats.UserInfo(n.Username, n.Password))
 	}
 	if n.UserCredentials != "" {
-		connOpts = append(connOpts, nats.UserCredentials(n.UserCredentials))
+		connOpts = append(connOpts, n.userCredentials())
 	}
 	if n.Token != "" {
 		connOpts = append(connOpts, nats.Token(n.Token))
 	}
-	if n.NKeySeed != "" {
+	if n.NKeySeed != "" && n.UserCredentials == "" {
 		nkeyOpt, err := nats.NkeyOptionFromSeed(n.NKeySeed)
 		if err != nil {
 			return nil, err
@@ -234,7 +245,7 @@ func (n NATSArgs) connectStan() (stan.Conn, error) {
 		connOpts = append(connOpts, stan.MaxPubAcksInflight(n.Streaming.MaxPubAcksInflight))
 	}
 	if n.UserCredentials != "" {
-		connOpts = append(connOpts, stan.NatsOptions(nats.UserCredentials(n.UserCredentials)))
+		connOpts = append(connOpts, stan.NatsOptions(n.userCredentials()))
 	}
 
 	return stan.Connect(n.Streaming.ClusterID, clientID, connOpts...)
