@@ -182,3 +182,46 @@ func TestCheckValidKeysDoesNotLeakValues(t *testing.T) {
 		assertRedacted(t, c.CheckValidKeys(subSys, nil))
 	})
 }
+
+func TestSetKVSKeyAlias(t *testing.T) {
+	defaultKVS := map[string]KVS{
+		NotifyNATSSubSys: {
+			{Key: Enable, Value: EnableOff},
+			{Key: "address", Value: ""},
+			{Key: "subject", Value: ""},
+			{Key: "user_credentials", Value: ""},
+			{Key: "jetstream", Value: EnableOff},
+		},
+	}
+
+	// The NATS user credentials may be set under the name of their
+	// environment variable, see https://github.com/pgsty/silo/issues/39.
+	cfg := New()
+	if _, err := cfg.SetKVS("notify_nats:FITCHECK address=nats-1:4222 subject=events.object.created MINIO_NOTIFY_NATS_USER_CREDENTIALS=/jwt/creds/minio_notifier.creds jetstream=off", defaultKVS); err != nil {
+		t.Fatal(err)
+	}
+	kvs := cfg[NotifyNATSSubSys]["FITCHECK"]
+	if got := kvs.Get("subject"); got != "events.object.created" {
+		t.Fatalf("subject: expected %q, got %q", "events.object.created", got)
+	}
+	if got := kvs.Get("user_credentials"); got != "/jwt/creds/minio_notifier.creds" {
+		t.Fatalf("user_credentials: expected %q, got %q", "/jwt/creds/minio_notifier.creds", got)
+	}
+	if _, ok := kvs.Lookup("MINIO_NOTIFY_NATS_USER_CREDENTIALS"); ok {
+		t.Fatal("the alias must be stored under the proper key")
+	}
+
+	// Setting the proper key replaces a legacy key stored by older releases.
+	cfg[NotifyNATSSubSys]["OLD"] = KVS{
+		{Key: Enable, Value: EnableOn},
+		{Key: "address", Value: "nats-1:4222"},
+		{Key: "MINIO_NOTIFY_NATS_USER_CREDENTIALS", Value: "/old.creds"},
+	}
+	if _, err := cfg.SetKVS("notify_nats:OLD user_credentials=/new.creds", defaultKVS); err != nil {
+		t.Fatal(err)
+	}
+	kvs = cfg[NotifyNATSSubSys]["OLD"]
+	if _, ok := kvs.Lookup("MINIO_NOTIFY_NATS_USER_CREDENTIALS"); ok || kvs.Get("user_credentials") != "/new.creds" {
+		t.Fatalf("legacy key was not replaced: %v", kvs)
+	}
+}

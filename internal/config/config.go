@@ -941,6 +941,14 @@ func kvFields(input string, keys []string) []string {
 }
 
 // SetKVS - set specific key values per sub-system.
+// subSysKeyAliases maps alternative key names accepted by SetKVS to the key
+// of the sub-system they set.
+var subSysKeyAliases = map[string]map[string]string{
+	// The NATS user credentials have been documented and set under the name
+	// of their environment variable, see https://github.com/pgsty/silo/issues/39.
+	NotifyNATSSubSys: {"MINIO_NOTIFY_NATS_USER_CREDENTIALS": "user_credentials"},
+}
+
 func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err error) {
 	subSys, inputs, tgt, err := GetSubSys(s)
 	if err != nil {
@@ -952,7 +960,14 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 
 	dynamic = SubSystemsDynamic.Contains(subSys)
 
-	fields := kvFields(inputs[1], defaultKVS[subSys].Keys())
+	// Aliases must be known keys for kvFields, otherwise they end up in the
+	// value of the preceding key.
+	aliases := subSysKeyAliases[subSys]
+	keys := defaultKVS[subSys].Keys()
+	for alias := range aliases {
+		keys = append(keys, alias)
+	}
+	fields := kvFields(inputs[1], keys)
 	if len(fields) == 0 {
 		return false, Errorf("sub-system '%s' cannot have empty keys", subSys)
 	}
@@ -974,6 +989,9 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 		}
 		if len(kv) == 2 {
 			prevK = kv[0]
+			if key, ok := aliases[prevK]; ok {
+				prevK = key
+			}
 			kvs.Set(prevK, madmin.SanitizeValue(kv[1]))
 			continue
 		}
@@ -1007,6 +1025,12 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 			continue
 		}
 		currKVS.Set(kv.Key, kv.Value)
+	}
+	// Drop aliases stored by older releases once the proper key is set.
+	for alias, key := range aliases {
+		if _, ok := kvs.Lookup(key); ok {
+			currKVS.Delete(alias)
+		}
 	}
 
 	v, ok := kvs.Lookup(Comment)
