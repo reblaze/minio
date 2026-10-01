@@ -95,28 +95,11 @@ func (evnot *EventNotifier) InitBucketTargets(ctx context.Context, objAPI Object
 		return errServerNotInitialized
 	}
 
-	if err := evnot.targetList.Add(globalNotifyTargetList.Targets()...); err != nil {
-		return err
-	}
+	err := registerBootNotifyTargets(evnot.targetList, globalNotifyTargetList.Targets())
+	// Always start the send workers, even if some targets could not be
+	// registered, otherwise queued events are never delivered.
 	evnot.targetList = evnot.targetList.Init(runtime.GOMAXPROCS(0)) // TODO: make this configurable (y4m4)
-	return nil
-}
-
-// ReloadNotifyTargets replaces configured notification targets at runtime.
-func (evnot *EventNotifier) ReloadNotifyTargets(oldTargets, newTargets *event.TargetList) error {
-	if evnot == nil || newTargets == nil {
-		return nil
-	}
-
-	oldTargetIDSet := event.NewTargetIDSet()
-	if oldTargets != nil {
-		for targetID := range oldTargets.TargetMap() {
-			oldTargetIDSet[targetID] = struct{}{}
-		}
-	}
-
-	evnot.targetList.Remove(oldTargetIDSet)
-	return evnot.targetList.Add(newTargets.Targets()...)
+	return err
 }
 
 // AddRulesMap - adds rules map for bucket name.

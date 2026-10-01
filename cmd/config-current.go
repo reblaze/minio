@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ import (
 	"github.com/minio/minio/internal/config/storageclass"
 	"github.com/minio/minio/internal/config/subnet"
 	"github.com/minio/minio/internal/crypto"
+	"github.com/minio/minio/internal/event"
 	"github.com/minio/minio/internal/event/target"
 	xhttp "github.com/minio/minio/internal/http"
 	"github.com/minio/minio/internal/logger"
@@ -58,8 +60,16 @@ import (
 )
 
 var (
+	// notifyNATSReloadMu serializes all changes to the registered NATS
+	// notification targets.
 	notifyNATSReloadMu sync.Mutex
+	// lastNotifyNATSArgs holds the arguments of the NATS targets currently
+	// registered with globalEventNotifier, indexed by target ID. It is nil
+	// until startup has created the notification targets.
 	lastNotifyNATSArgs map[string]target.NATSArgs
+	// bootNotifyTargetsRegistered is set once the notification targets
+	// created at startup are registered with globalEventNotifier.
+	bootNotifyTargetsRegistered bool
 )
 
 func initHelp() {
@@ -539,10 +549,7 @@ func lookupConfigs(s config.Config, objAPI ObjectLayer) {
 	transport := NewHTTPTransport()
 
 	bootstrapTraceMsg("initialize the event notification targets")
-	globalNotifyTargetList, err = notify.FetchEnabledTargets(GlobalContext, s, transport)
-	if err != nil {
-		configLogIf(ctx, fmt.Errorf("Unable to initialize notification target(s): %w", err))
-	}
+	initNotifyTargets(ctx, s, transport)
 
 	bootstrapTraceMsg("initialize the lambda targets")
 	globalLambdaTargetList, err = lambda.FetchEnabledTargets(GlobalContext, s, transport)
@@ -706,7 +713,7 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 			globalBrowserConfig.Update(browserCfg)
 		}
 	case config.NotifyNATSSubSys:
-		if err := reloadDynamicNotifyTargets(ctx, s); err != nil {
+		if err := reloadNotifyNATSTargets(ctx, s); err != nil {
 			errs = append(errs, err)
 		}
 	case config.ILMSubSys:
@@ -734,59 +741,170 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 	return nil
 }
 
-func reloadDynamicNotifyTargets(ctx context.Context, s config.Config) error {
-	changed, err := notifyNATSConfigChanged(s)
+// natsTargetName is the event.TargetID name of NATS notification targets.
+const natsTargetName = "nats"
+
+// initNotifyTargets creates the notification targets at startup and records
+// the notify_nats configuration they were created from, so that the dynamic
+// config apply that follows does not create the same NATS targets a second
+// time. When the targets could not be created, nothing is recorded and the
+// dynamic config apply creates the NATS targets instead.
+//
+// Once the targets are registered with globalEventNotifier this is a no-op:
+// NATS targets are then reloaded dynamically and other notification targets
+// need a restart, so creating them again would only leak them.
+func initNotifyTargets(ctx context.Context, s config.Config, transport *http.Transport) {
+	notifyNATSReloadMu.Lock()
+	defer notifyNATSReloadMu.Unlock()
+
+	if bootNotifyTargetsRegistered {
+		return
+	}
+
+	targetList, err := notify.FetchEnabledTargets(GlobalContext, s, transport)
 	if err != nil {
-		return fmt.Errorf("unable to parse notify_nats configuration: %w", err)
+		configLogIf(ctx, fmt.Errorf("Unable to initialize notification target(s): %w", err))
 	}
-	if !changed {
-		return nil
+	// The targets of a previous call were never registered, close them.
+	for _, t := range globalNotifyTargetList.Targets() {
+		t.Close()
 	}
+	globalNotifyTargetList = targetList
 
-	transport := NewHTTPTransport()
-	newNotifyTargetList, err := notify.FetchEnabledTargets(ctx, s, transport)
+	if lastNotifyNATSArgs != nil {
+		return
+	}
+	lastNotifyNATSArgs = make(map[string]target.NATSArgs)
 	if err != nil {
-		return fmt.Errorf("unable to initialize notification target(s): %w", err)
+		return
 	}
-
-	oldNotifyTargetList := globalNotifyTargetList
-	globalNotifyTargetList = newNotifyTargetList
-
-	if globalEventNotifier != nil {
-		if err := globalEventNotifier.ReloadNotifyTargets(oldNotifyTargetList, newNotifyTargetList); err != nil {
-			return fmt.Errorf("unable to reload notification target(s): %w", err)
-		}
+	if args, err := notify.GetNotifyNATS(s[config.NotifyNATSSubSys], nil); err == nil {
+		lastNotifyNATSArgs = args
 	}
-
-	return nil
 }
 
-func notifyNATSConfigChanged(s config.Config) (bool, error) {
+// reloadNotifyNATSTargets applies notify_nats configuration changes to the
+// running event notifier, one target at a time: unchanged targets are left
+// untouched, new targets are added, changed targets are swapped atomically
+// and removed or disabled targets are closed. A target that fails to be
+// created keeps its previous instance running and is retried on the next
+// reload. Other notification target types are never touched.
+func reloadNotifyNATSTargets(ctx context.Context, s config.Config) error {
 	nextArgs, err := notify.GetNotifyNATS(s[config.NotifyNATSSubSys], nil)
 	if err != nil {
-		return false, err
+		return fmt.Errorf("unable to parse notify_nats configuration: %w", err)
 	}
 
 	notifyNATSReloadMu.Lock()
 	defer notifyNATSReloadMu.Unlock()
 
-	if reflect.DeepEqual(lastNotifyNATSArgs, nextArgs) {
-		return false, nil
+	if lastNotifyNATSArgs == nil || globalEventNotifier == nil {
+		// Startup has not created the notification targets yet.
+		return nil
 	}
-	lastNotifyNATSArgs = maps.Clone(nextArgs)
-	return true, nil
+
+	var (
+		errs      []error
+		added     []event.Target
+		addedArgs = make(map[string]target.NATSArgs)
+		removeIDs = event.NewTargetIDSet()
+	)
+	for id := range lastNotifyNATSArgs {
+		if _, ok := nextArgs[id]; !ok {
+			removeIDs[event.TargetID{ID: id, Name: natsTargetName}] = struct{}{}
+		}
+	}
+	transport := NewHTTPTransport()
+	for id, args := range nextArgs {
+		if lastArgs, ok := lastNotifyNATSArgs[id]; ok && reflect.DeepEqual(lastArgs, args) {
+			continue
+		}
+		t, err := notify.NewNATSTarget(id, args, transport)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("unable to initialize notification target %s:%s: %w", id, natsTargetName, err))
+			continue
+		}
+		// Also remove any instance with this ID that is not tracked yet.
+		removeIDs[t.ID()] = struct{}{}
+		added = append(added, t)
+		addedArgs[id] = args
+	}
+	if len(removeIDs) == 0 {
+		return errors.Join(errs...)
+	}
+
+	removed, err := globalEventNotifier.targetList.Replace(removeIDs, added...)
+	if err != nil {
+		for _, t := range added {
+			t.Close()
+		}
+		errs = append(errs, fmt.Errorf("unable to reload notification target(s): %w", err))
+		return errors.Join(errs...)
+	}
+	for _, t := range removed {
+		if err := t.Close(); err != nil {
+			configLogIf(ctx, fmt.Errorf("unable to close notification target %s: %w", t.ID(), err))
+		}
+	}
+
+	for id := range lastNotifyNATSArgs {
+		if _, ok := nextArgs[id]; !ok {
+			delete(lastNotifyNATSArgs, id)
+		}
+	}
+	maps.Copy(lastNotifyNATSArgs, addedArgs)
+
+	return errors.Join(errs...)
+}
+
+// registerBootNotifyTargets adds the notification targets created at startup
+// to list. NATS targets that a dynamic reload has meanwhile replaced, removed
+// or disabled are closed instead, so that stale or duplicate targets never
+// end up in the list. Targets that are already registered are skipped.
+func registerBootNotifyTargets(list *event.TargetList, targets []event.Target) error {
+	notifyNATSReloadMu.Lock()
+	defer notifyNATSReloadMu.Unlock()
+
+	var add, stale []event.Target
+	registered := list.TargetMap()
+	for _, t := range targets {
+		id := t.ID()
+		if existing, ok := registered[id]; ok {
+			if existing != t {
+				stale = append(stale, t)
+			}
+			continue
+		}
+		if id.Name == natsTargetName && lastNotifyNATSArgs != nil {
+			if _, ok := lastNotifyNATSArgs[id.ID]; !ok {
+				stale = append(stale, t)
+				continue
+			}
+		}
+		add = append(add, t)
+	}
+	for _, t := range stale {
+		t.Close()
+	}
+	bootNotifyTargetsRegistered = true
+	return list.Add(add...)
 }
 
 // applyDynamicConfig will apply dynamic config values.
 // Dynamic systems should be in config.SubSystemsDynamic as well.
 func applyDynamicConfig(ctx context.Context, objAPI ObjectLayer, s config.Config) error {
+	// Apply every sub-system even if one fails, so a single bad sub-system
+	// does not leave the remaining ones unapplied.
+	var errs []error
 	for subSys := range config.SubSystemsDynamic {
-		err := applyDynamicConfigForSubSys(ctx, objAPI, s, subSys)
-		if err != nil {
-			return err
+		if err := applyDynamicConfigForSubSys(ctx, objAPI, s, subSys); err != nil {
+			if errors.Is(err, errServerNotInitialized) {
+				return err
+			}
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Help - return sub-system level help

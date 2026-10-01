@@ -96,6 +96,16 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 		return nil, err
 	}
 
+	defer func() {
+		if err != nil {
+			// Do not leak the targets created before the failure.
+			for _, t := range targets {
+				t.Close()
+			}
+			targets = nil
+		}
+	}()
+
 	switch subSys {
 	case config.NotifyAMQPSubSys:
 		amqpTargets, err := GetNotifyAMQP(cfg[config.NotifyAMQPSubSys])
@@ -108,7 +118,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewAMQPTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -123,7 +133,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewElasticsearchTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -139,7 +149,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			args.TLS.RootCAs = transport.TLSClientConfig.RootCAs
 			t, err := target.NewKafkaTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -156,7 +166,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			args.RootCAs = transport.TLSClientConfig.RootCAs
 			t, err := target.NewMQTTTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -171,7 +181,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewMySQLTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -186,7 +196,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewNATSTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -201,7 +211,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewNSQTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -216,7 +226,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewPostgreSQLTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -231,7 +241,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewRedisTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -246,7 +256,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewWebhookTarget(ctx, id, args, logOnceIf, transport)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -265,18 +275,38 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 // operators currently expect to fail loudly.
 func FetchEnabledTargets(ctx context.Context, cfg config.Config, transport *http.Transport) (_ *event.TargetList, err error) {
 	targetList := event.NewTargetList(ctx)
+	defer func() {
+		if err != nil {
+			// Do not leak the targets created before the failure.
+			for _, t := range targetList.Targets() {
+				t.Close()
+			}
+		}
+	}()
 	for _, subSys := range config.NotifySubSystems.ToSlice() {
 		targets, err := fetchSubSysTargets(ctx, cfg, subSys, transport)
 		if err != nil {
 			return nil, err
 		}
-		for _, t := range targets {
+		for i, t := range targets {
 			if err = targetList.Add(t); err != nil {
+				for _, t := range targets[i:] {
+					t.Close()
+				}
 				return nil, err
 			}
 		}
 	}
 	return targetList, nil
+}
+
+// NewNATSTarget - creates a single NATS target, the same way as
+// FetchEnabledTargets does, for the given target ID and arguments.
+func NewNATSTarget(id string, args target.NATSArgs, transport *http.Transport) (event.Target, error) {
+	if transport != nil && transport.TLSClientConfig != nil {
+		args.RootCAs = transport.TLSClientConfig.RootCAs
+	}
+	return target.NewNATSTarget(id, args, logOnceIf)
 }
 
 // DefaultNotificationKVS - default notification list of kvs.
