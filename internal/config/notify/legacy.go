@@ -147,8 +147,12 @@ func SetNotifyAMQP(s config.Config, amqpName string, cfg target.AMQPArgs) error 
 			Value: config.FormatBool(cfg.Mandatory),
 		},
 		config.KV{
-			Key:   target.AmqpInternal,
+			Key:   target.AmqpImmediate,
 			Value: config.FormatBool(cfg.Immediate),
+		},
+		config.KV{
+			Key:   target.AmqpInternal,
+			Value: config.FormatBool(cfg.Internal),
 		},
 		config.KV{
 			Key:   target.AmqpDurable,

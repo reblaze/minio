@@ -96,6 +96,16 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 		return nil, err
 	}
 
+	defer func() {
+		if err != nil {
+			// Do not leak the targets created before the failure.
+			for _, t := range targets {
+				t.Close()
+			}
+			targets = nil
+		}
+	}()
+
 	switch subSys {
 	case config.NotifyAMQPSubSys:
 		amqpTargets, err := GetNotifyAMQP(cfg[config.NotifyAMQPSubSys])
@@ -108,7 +118,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewAMQPTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -123,7 +133,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewElasticsearchTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -139,7 +149,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			args.TLS.RootCAs = transport.TLSClientConfig.RootCAs
 			t, err := target.NewKafkaTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -156,7 +166,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			args.RootCAs = transport.TLSClientConfig.RootCAs
 			t, err := target.NewMQTTTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -171,7 +181,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewMySQLTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -186,7 +196,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewNATSTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -201,7 +211,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewNSQTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -216,7 +226,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewPostgreSQLTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -231,7 +241,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewRedisTarget(id, args, logOnceIf)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -246,7 +256,7 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 			}
 			t, err := target.NewWebhookTarget(ctx, id, args, logOnceIf, transport)
 			if err != nil {
-				return nil, err
+				return targets, err
 			}
 			targets = append(targets, t)
 		}
@@ -255,20 +265,48 @@ func fetchSubSysTargets(ctx context.Context, cfg config.Config, subSys string, t
 }
 
 // FetchEnabledTargets - Returns a set of configured TargetList
+//
+// This fails fast: the first sub-system that fails to validate or parse aborts
+// the whole call and no target list is returned. A single malformed notify
+// sub-system therefore disables bucket notifications for every other target as
+// well, since the caller only logs the error and leaves the global target list
+// nil. That is the long-standing behavior and is kept deliberately; changing
+// it to skip only the broken sub-system would silently degrade a config that
+// operators currently expect to fail loudly.
 func FetchEnabledTargets(ctx context.Context, cfg config.Config, transport *http.Transport) (_ *event.TargetList, err error) {
 	targetList := event.NewTargetList(ctx)
+	defer func() {
+		if err != nil {
+			// Do not leak the targets created before the failure.
+			for _, t := range targetList.Targets() {
+				t.Close()
+			}
+		}
+	}()
 	for _, subSys := range config.NotifySubSystems.ToSlice() {
 		targets, err := fetchSubSysTargets(ctx, cfg, subSys, transport)
 		if err != nil {
 			return nil, err
 		}
-		for _, t := range targets {
+		for i, t := range targets {
 			if err = targetList.Add(t); err != nil {
+				for _, t := range targets[i:] {
+					t.Close()
+				}
 				return nil, err
 			}
 		}
 	}
 	return targetList, nil
+}
+
+// NewNATSTarget - creates a single NATS target, the same way as
+// FetchEnabledTargets does, for the given target ID and arguments.
+func NewNATSTarget(id string, args target.NATSArgs, transport *http.Transport) (event.Target, error) {
+	if transport != nil && transport.TLSClientConfig != nil {
+		args.RootCAs = transport.TLSClientConfig.RootCAs
+	}
+	return target.NewNATSTarget(id, args, logOnceIf)
 }
 
 // DefaultNotificationKVS - default notification list of kvs.
@@ -287,10 +325,29 @@ var (
 	}
 )
 
+// legacyNATSUserCredentialsKey is the NATS user credentials env var name, which
+// pre-fix migration code wrote into the config store as if it were a config
+// key. It is tolerated so that already-migrated stores keep loading; the proper
+// user_credentials key takes precedence when both are present.
+//
+// Spelled as a literal on purpose: it names what is already written on disk, so
+// it must not follow any later rename of target.EnvNATSUserCredentials.
+//
+// The tolerance below relies on config.CheckValidKeys, the free function, whose
+// variadic deprecatedKeys means "accept these anyway". The same-named method
+// config.Config.CheckValidKeys takes deprecatedKeys with the opposite meaning:
+// it subtracts them from the valid set, making them rejected. Switching this
+// call to the method form would therefore invert the tolerance into a ban.
+const legacyNATSUserCredentialsKey = "MINIO_NOTIFY_NATS_USER_CREDENTIALS"
+
 func checkValidNotificationKeysForSubSys(subSys string, tgt map[string]config.KVS) error {
 	validKVS, ok := DefaultNotificationKVS[subSys]
 	if !ok {
 		return nil
+	}
+	var deprecatedKeys []string
+	if subSys == config.NotifyNATSSubSys {
+		deprecatedKeys = []string{legacyNATSUserCredentialsKey}
 	}
 	for tname, kv := range tgt {
 		subSysTarget := subSys
@@ -298,7 +355,7 @@ func checkValidNotificationKeysForSubSys(subSys string, tgt map[string]config.KV
 			subSysTarget = subSys + config.SubSystemSeparator + tname
 		}
 		if v, ok := kv.Lookup(config.Enable); ok && v == config.EnableOn {
-			if err := config.CheckValidKeys(subSysTarget, kv, validKVS); err != nil {
+			if err := config.CheckValidKeys(subSysTarget, kv, validKVS, deprecatedKeys...); err != nil {
 				return err
 			}
 		}
@@ -987,7 +1044,7 @@ func GetNotifyNATS(natsKVS map[string]config.KVS, rootCAs *x509.CertPool) (map[s
 			usernameEnv = usernameEnv + config.Default + k
 		}
 
-		userCredentialsEnv := target.NATSUserCredentials
+		userCredentialsEnv := target.EnvNATSUserCredentials
 		if k != config.Default {
 			userCredentialsEnv = userCredentialsEnv + config.Default + k
 		}
@@ -1032,12 +1089,21 @@ func GetNotifyNATS(natsKVS map[string]config.KVS, rootCAs *x509.CertPool) (map[s
 			jetStreamEnableEnv = jetStreamEnableEnv + config.Default + k
 		}
 
+		userCredentials := kv.Get(target.NATSUserCredentials)
+		if userCredentials == "" {
+			// Fall back to the legacy key written by pre-fix migration code;
+			// tolerated for compatibility. The proper user_credentials key
+			// wins when both are present, and the environment still overrides
+			// both.
+			userCredentials = kv.Get(legacyNATSUserCredentialsKey)
+		}
+
 		natsArgs := target.NATSArgs{
 			Enable:            true,
 			Address:           *address,
 			Subject:           env.Get(subjectEnv, kv.Get(target.NATSSubject)),
 			Username:          env.Get(usernameEnv, kv.Get(target.NATSUsername)),
-			UserCredentials:   env.Get(userCredentialsEnv, kv.Get(target.NATSUserCredentials)),
+			UserCredentials:   env.Get(userCredentialsEnv, userCredentials),
 			Password:          env.Get(passwordEnv, kv.Get(target.NATSPassword)),
 			CertAuthority:     env.Get(certAuthorityEnv, kv.Get(target.NATSCertAuthority)),
 			ClientCert:        env.Get(clientCertEnv, kv.Get(target.NATSClientCert)),
@@ -1662,6 +1728,10 @@ var (
 		},
 		config.KV{
 			Key:   target.AmqpMandatory,
+			Value: config.EnableOff,
+		},
+		config.KV{
+			Key:   target.AmqpImmediate,
 			Value: config.EnableOff,
 		},
 		config.KV{

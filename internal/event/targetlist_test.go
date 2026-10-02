@@ -223,3 +223,53 @@ func TestNewTargetList(t *testing.T) {
 		t.Fatalf("test: result: expected: <non-nil>, got: <nil>")
 	}
 }
+
+func TestTargetListReplace(t *testing.T) {
+	targetA := &ExampleTarget{TargetID{"a", "nats"}, false, false}
+	targetB := &ExampleTarget{TargetID{"b", "nats"}, false, false}
+	targetW := &ExampleTarget{TargetID{"a", "webhook"}, false, false}
+	newTargetA := &ExampleTarget{TargetID{"a", "nats"}, false, false}
+	targetC := &ExampleTarget{TargetID{"c", "nats"}, false, false}
+
+	newList := func() *TargetList {
+		list := NewTargetList(t.Context())
+		if err := list.Add(targetA, targetB, targetW); err != nil {
+			t.Fatal(err)
+		}
+		return list
+	}
+
+	// Replace one target, remove one and add a new one atomically.
+	list := newList()
+	removeIDs := NewTargetIDSet(targetA.ID(), targetB.ID(), TargetID{"missing", "nats"})
+	removed, err := list.Replace(removeIDs, newTargetA, targetC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 2 {
+		t.Fatalf("expected 2 removed targets, got %d", len(removed))
+	}
+	targets := list.TargetMap()
+	if len(targets) != 3 || targets[targetA.ID()] != Target(newTargetA) ||
+		targets[targetC.ID()] != Target(targetC) || targets[targetW.ID()] != Target(targetW) {
+		t.Fatalf("unexpected targets after replace: %v", targets)
+	}
+
+	// Adding an existing ID that is not removed must fail without changes.
+	list = newList()
+	if _, err = list.Replace(NewTargetIDSet(targetB.ID()), newTargetA); err == nil {
+		t.Fatal("expected error for an existing target ID")
+	}
+	if targets = list.TargetMap(); len(targets) != 3 || targets[targetA.ID()] != Target(targetA) {
+		t.Fatalf("target list changed after a failed replace: %v", targets)
+	}
+
+	// Duplicated IDs to add must fail without changes.
+	list = newList()
+	if _, err = list.Replace(NewTargetIDSet(), targetC, targetC); err == nil {
+		t.Fatal("expected error for duplicated target IDs")
+	}
+	if targets = list.TargetMap(); len(targets) != 3 {
+		t.Fatalf("target list changed after a failed replace: %v", targets)
+	}
+}

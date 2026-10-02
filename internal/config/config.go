@@ -625,6 +625,19 @@ func LookupSite(siteKV KVS, regionKV KVS) (s Site, err error) {
 	return s, err
 }
 
+// invalidKeyNames returns a comma separated list of the key names in kvs.
+//
+// Only names are returned, never values: this list is embedded in errors that
+// are written to the server log and printed by `mc`, and a rejected key may
+// well be carrying a credential.
+func invalidKeyNames(kvs KVS) string {
+	names := make([]string, 0, len(kvs))
+	for _, kv := range kvs {
+		names = append(names, kv.Key)
+	}
+	return strings.Join(names, ", ")
+}
+
 // CheckValidKeys - checks if inputs KVS has the necessary keys,
 // returns error if it find extra or superfluous keys.
 func CheckValidKeys(subSys string, kv KVS, validKVS KVS, deprecatedKeys ...string) error {
@@ -649,7 +662,7 @@ func CheckValidKeys(subSys string, kv KVS, validKVS KVS, deprecatedKeys ...strin
 	}
 	if len(nkv) > 0 {
 		return Errorf(
-			"found invalid keys (%s) for '%s' sub-system, use 'mc admin config reset myminio %s' to fix invalid keys", nkv.String(), subSys, subSys)
+			"found invalid keys (%s) for '%s' sub-system, use 'mc admin config reset myminio %s' to fix invalid keys", invalidKeyNames(nkv), subSys, subSys)
 	}
 	return nil
 }
@@ -928,6 +941,14 @@ func kvFields(input string, keys []string) []string {
 }
 
 // SetKVS - set specific key values per sub-system.
+// subSysKeyAliases maps alternative key names accepted by SetKVS to the key
+// of the sub-system they set.
+var subSysKeyAliases = map[string]map[string]string{
+	// The NATS user credentials have been documented and set under the name
+	// of their environment variable, see https://github.com/pgsty/silo/issues/39.
+	NotifyNATSSubSys: {"MINIO_NOTIFY_NATS_USER_CREDENTIALS": "user_credentials"},
+}
+
 func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err error) {
 	subSys, inputs, tgt, err := GetSubSys(s)
 	if err != nil {
@@ -939,7 +960,14 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 
 	dynamic = SubSystemsDynamic.Contains(subSys)
 
-	fields := kvFields(inputs[1], defaultKVS[subSys].Keys())
+	// Aliases must be known keys for kvFields, otherwise they end up in the
+	// value of the preceding key.
+	aliases := subSysKeyAliases[subSys]
+	keys := defaultKVS[subSys].Keys()
+	for alias := range aliases {
+		keys = append(keys, alias)
+	}
+	fields := kvFields(inputs[1], keys)
 	if len(fields) == 0 {
 		return false, Errorf("sub-system '%s' cannot have empty keys", subSys)
 	}
@@ -961,6 +989,9 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 		}
 		if len(kv) == 2 {
 			prevK = kv[0]
+			if key, ok := aliases[prevK]; ok {
+				prevK = key
+			}
 			kvs.Set(prevK, madmin.SanitizeValue(kv[1]))
 			continue
 		}
@@ -994,6 +1025,12 @@ func (c Config) SetKVS(s string, defaultKVS map[string]KVS) (dynamic bool, err e
 			continue
 		}
 		currKVS.Set(kv.Key, kv.Value)
+	}
+	// Drop aliases stored by older releases once the proper key is set.
+	for alias, key := range aliases {
+		if _, ok := kvs.Lookup(key); ok {
+			currKVS.Delete(alias)
+		}
 	}
 
 	v, ok := kvs.Lookup(Comment)
@@ -1094,7 +1131,7 @@ func (c Config) CheckValidKeys(subSys string, deprecatedKeys []string) error {
 		if len(invalidKV) > 0 {
 			return Errorf(
 				"found invalid keys (%s) for '%s:%s' sub-system, use 'mc admin config reset myminio %s:%s' to fix invalid keys",
-				invalidKV.String(), subSys, tgt, subSys, tgt)
+				invalidKeyNames(invalidKV), subSys, tgt, subSys, tgt)
 		}
 	}
 	return nil

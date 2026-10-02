@@ -18,6 +18,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -126,5 +127,101 @@ func TestValidRegion(t *testing.T) {
 				t.Errorf("Expected %t, got %t", test.success, ok)
 			}
 		})
+	}
+}
+
+// The invalid-keys error is logged by the server and printed by `mc`. A
+// rejected key may carry a credential, so only key names may appear in it.
+func TestCheckValidKeysDoesNotLeakValues(t *testing.T) {
+	const (
+		badKey    = "unknown_key"
+		badSecret = "s3cr3t-must-not-appear"
+	)
+
+	assertRedacted := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error for an unregistered key")
+		}
+		msg := err.Error()
+		if strings.Contains(msg, badSecret) {
+			t.Errorf("error leaks the rejected value: %s", msg)
+		}
+		if !strings.Contains(msg, badKey) {
+			t.Errorf("error does not name the rejected key: %s", msg)
+		}
+		if !strings.Contains(msg, "mc admin config reset") {
+			t.Errorf("error lost the remediation hint: %s", msg)
+		}
+	}
+
+	t.Run("func", func(t *testing.T) {
+		kv := KVS{
+			KV{Key: Enable, Value: EnableOn},
+			KV{Key: badKey, Value: badSecret},
+		}
+		validKVS := KVS{KV{Key: Enable, Value: EnableOff}}
+		assertRedacted(t, CheckValidKeys("test_subsys", kv, validKVS))
+	})
+
+	t.Run("method", func(t *testing.T) {
+		const subSys = "test_subsys_method"
+		RegisterDefaultKVS(map[string]KVS{
+			subSys: {KV{Key: Enable, Value: EnableOff}},
+		})
+		t.Cleanup(func() { delete(DefaultKVS, subSys) })
+
+		c := Config{
+			subSys: map[string]KVS{
+				Default: {
+					KV{Key: Enable, Value: EnableOn},
+					KV{Key: badKey, Value: badSecret},
+				},
+			},
+		}
+		assertRedacted(t, c.CheckValidKeys(subSys, nil))
+	})
+}
+
+func TestSetKVSKeyAlias(t *testing.T) {
+	defaultKVS := map[string]KVS{
+		NotifyNATSSubSys: {
+			{Key: Enable, Value: EnableOff},
+			{Key: "address", Value: ""},
+			{Key: "subject", Value: ""},
+			{Key: "user_credentials", Value: ""},
+			{Key: "jetstream", Value: EnableOff},
+		},
+	}
+
+	// The NATS user credentials may be set under the name of their
+	// environment variable, see https://github.com/pgsty/silo/issues/39.
+	cfg := New()
+	if _, err := cfg.SetKVS("notify_nats:FITCHECK address=nats-1:4222 subject=events.object.created MINIO_NOTIFY_NATS_USER_CREDENTIALS=/jwt/creds/minio_notifier.creds jetstream=off", defaultKVS); err != nil {
+		t.Fatal(err)
+	}
+	kvs := cfg[NotifyNATSSubSys]["FITCHECK"]
+	if got := kvs.Get("subject"); got != "events.object.created" {
+		t.Fatalf("subject: expected %q, got %q", "events.object.created", got)
+	}
+	if got := kvs.Get("user_credentials"); got != "/jwt/creds/minio_notifier.creds" {
+		t.Fatalf("user_credentials: expected %q, got %q", "/jwt/creds/minio_notifier.creds", got)
+	}
+	if _, ok := kvs.Lookup("MINIO_NOTIFY_NATS_USER_CREDENTIALS"); ok {
+		t.Fatal("the alias must be stored under the proper key")
+	}
+
+	// Setting the proper key replaces a legacy key stored by older releases.
+	cfg[NotifyNATSSubSys]["OLD"] = KVS{
+		{Key: Enable, Value: EnableOn},
+		{Key: "address", Value: "nats-1:4222"},
+		{Key: "MINIO_NOTIFY_NATS_USER_CREDENTIALS", Value: "/old.creds"},
+	}
+	if _, err := cfg.SetKVS("notify_nats:OLD user_credentials=/new.creds", defaultKVS); err != nil {
+		t.Fatal(err)
+	}
+	kvs = cfg[NotifyNATSSubSys]["OLD"]
+	if _, ok := kvs.Lookup("MINIO_NOTIFY_NATS_USER_CREDENTIALS"); ok || kvs.Get("user_credentials") != "/new.creds" {
+		t.Fatalf("legacy key was not replaced: %v", kvs)
 	}
 }

@@ -209,6 +209,43 @@ func (list *TargetList) Remove(targetIDSet TargetIDSet) {
 	}
 }
 
+// Replace - atomically removes the targets with the given IDs and adds the
+// given targets, so events are never sent to a partially updated list.
+// Unlike Remove, removed targets are not closed; they are returned and the
+// caller must close them. Nothing is changed if a target to add has an ID
+// that is already registered and not being removed, or is duplicated.
+func (list *TargetList) Replace(removeIDs TargetIDSet, targets ...Target) ([]Target, error) {
+	list.Lock()
+	defer list.Unlock()
+
+	addIDs := NewTargetIDSet()
+	for _, target := range targets {
+		id := target.ID()
+		if _, ok := addIDs[id]; ok {
+			return nil, fmt.Errorf("target %v is duplicated", id)
+		}
+		addIDs[id] = struct{}{}
+		if _, ok := list.targets[id]; ok {
+			if _, ok := removeIDs[id]; !ok {
+				return nil, fmt.Errorf("target %v already exists", id)
+			}
+		}
+	}
+
+	var removed []Target
+	for id := range removeIDs {
+		if target, ok := list.targets[id]; ok {
+			removed = append(removed, target)
+			delete(list.targets, id)
+		}
+	}
+	for _, target := range targets {
+		list.targets[target.ID()] = target
+	}
+
+	return removed, nil
+}
+
 // Targets - list all targets
 func (list *TargetList) Targets() []Target {
 	if list == nil {
